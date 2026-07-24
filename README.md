@@ -1,59 +1,69 @@
-# SonarDBSCAN 
 
-SonarDBSCAN is a highly optimized, distributed implementation of the **Density-Based Spatial Clustering of Applications with Noise (DBSCAN)** algorithm, built natively for PySpark. 
+# SonarDBSCAN
 
-By leveraging **GraphFrames** for connected component resolution and a **Triangle Inequality-based metric space optimization**, SonarDBSCAN drastically reduces the computational overhead typically associated with distributed spatial clustering.
+SonarDBSCAN is a highly optimized, distributed implementation of the Density-Based Spatial Clustering of Applications with Noise (DBSCAN) algorithm, built natively for PySpark. 
 
----
-
-## 📖 The Algorithm
-
-Standard DBSCAN relies on two hyper-parameters:
-* **Epsilon (eps):** The spatial radius around a given point.
-* **MinPts (n):** The minimum number of neighbors within the `eps` radius required to define a dense region.
-
-The algorithm categorizes points into three types:
-1. **Core Points:** Points with at least `MinPts` neighbors.
-2. **Border Points:** Points with fewer than `MinPts` neighbors, but which fall within the `eps` radius of a Core Point.
-3. **Noise:** Points that are neither Core nor Border points.
-
-### The PySpark Challenge & Our Optimization
-In a distributed environment like PySpark, calculating distances between all pairs of points requires a massive Cartesian product (O(N²)), which causes severe network shuffling and memory bottlenecks.
-
-SonarDBSCAN solves this in metric spaces (like Euclidean distance) using the **Triangle Inequality**: 
-`d(a, b) + d(b, c) >= d(a, c)`
-
-**The Ring Partitioning Strategy:**
-1. The algorithm selects a random pivot point, `c`.
-2. It calculates the distance from all dataset points to `c`.
-3. It assigns each point to a "ring" `k`, such that its distance to `c` falls exactly between `k * eps` and `(k + 1) * eps`.
-
-Based on this projection, we can mathematically eliminate the need to compare points across distant rings using two geometric lemmas:
-
-* **Lemma 1:** If `d(x, c) >= (k + 1) * eps` and `d(y, c) < k * eps`, then `d(x, y) > eps`.
-  *(Proof: `d(x, y) >= d(x, c) - d(y, c) > (k + 1)*eps - k*eps = eps`)*
-* **Lemma 2:** If `d(x, c) <= k * eps` and `d(y, c) > (k + 1) * eps`, then `d(x, y) > eps`.
-  *(Proof: `d(x, c) >= d(y, c) - d(x, y) > (1 + k)*eps - k*eps = eps`)*
-
-**The Result:** If point `x` is in ring `k`, SonarDBSCAN only evaluates distances between `x` and points in rings `k-1`, `k`, and `k+1`. All other Cartesian pairs are safely discarded prior to any shuffling, resulting in massive performance gains.
+Designed for large-scale spatial datasets, SonarDBSCAN mitigates the $O(N^2)$ computational bottleneck of distributed distance calculations by leveraging a metric-space optimization based on the triangle inequality. Graph processing and connected component resolution are delegated to the GraphFrames library, ensuring robust lineage handling and execution stability across cluster environments.
 
 ---
 
-## ⚙️ Prerequisites & Installation
+## Table of Contents
+1. [Mathematical Foundations and Optimization](#mathematical-foundations-and-optimization)
+2. [System Requirements and Installation](#system-requirements-and-installation)
+3. [Usage Integration](#usage-integration)
+4. [Testing Framework](#testing-framework)
+5. [Performance Considerations and Limitations](#performance-considerations-and-limitations)
 
-SonarDBSCAN requires PySpark and the **GraphFrames** package. We recommend using `uv` for fast, reproducible environment management.
+---
 
-### 1. Fetch the GraphFrames JAR
-GraphFrames is required for the underlying graph component processing. You must download the JAR file that matches your Spark and Scala versions. 
+## Mathematical Foundations and Optimization
 
-For **Spark 3.2 (Scala 2.12)**, open your terminal and fetch it using `curl`:
+Standard DBSCAN implementations in distributed environments suffer from the necessity of calculating the Cartesian product of all data points to discover $\epsilon$-neighborhoods. This results in severe network shuffling and memory exhaustion.
+
+SonarDBSCAN assumes the underlying space is a metric space $(X, d)$, satisfying the triangle inequality:
+
+$$d(x, y) + d(y, c) \geq d(x, c)$$
+
+To optimize neighborhood discovery, the algorithm implements a Ring Partitioning strategy:
+1. A global pivot point $c \in X$ is selected uniformly at random.
+2. The distance $d(x, c)$ is computed for every point $x \in X$.
+3. Points are partitioned into disjoint spatial rings $R_k$, where a point $x$ belongs to ring $k$ if and only if its distance to $c$ satisfies $k\epsilon \leq d(x, c) < (k + 1)\epsilon$.
+
+By projecting the dataset into these rings, SonarDBSCAN mathematically guarantees that Cartesian evaluations are only necessary between adjacent rings. This guarantee is formalized by the following lemmas:
+
+**Lemma 1**
+If $d(x, c) \geq (k + 1)\epsilon$ and $d(y, c) < k\epsilon$, then $d(x, y) > \epsilon$.
+
+*Proof:*
+By the triangle inequality, we have $d(x, y) + d(y, c) \geq d(x, c)$. Rearranging the terms yields:
+$$d(x, y) \geq d(x, c) - d(y, c)$$
+Substituting the known bounds:
+$$d(x, y) > (k + 1)\epsilon - k\epsilon = \epsilon$$
+
+**Lemma 2**
+If $d(x, c) \leq k\epsilon$ and $d(y, c) > (k + 1)\epsilon$, then $d(x, y) > \epsilon$.
+
+*Proof:*
+By the triangle inequality, $d(x, y) + d(x, c) \geq d(y, c)$. Rearranging the terms yields:
+$$d(x, y) \geq d(y, c) - d(x, c)$$
+Substituting the known bounds:
+$$d(x, y) > (1 + k)\epsilon - k\epsilon = \epsilon$$
+
+**Consequence:** For any point $x \in R_k$, neighbors within distance $\epsilon$ can strictly only exist within $R_{k-1}$, $R_k$, and $R_{k+1}$. All other Cartesian pairs are pruned prior to the Spark shuffle phase.
+
+## System Requirements and Installation
+
+SonarDBSCAN requires PySpark ($\geq 3.0.0$) and GraphFrames ($\geq 0.8.0$). It is recommended to manage the environment using `uv` for deterministic dependency resolution.
+
+### 1. Retrieve the GraphFrames Dependency
+GraphFrames relies on a compiled JAR that must match your Spark and Scala versions. For Spark 3.2 built on Scala 2.12, fetch the JAR via your terminal:
 
 ```bash
 curl -O https://repos.spark-packages.org/graphframes/graphframes/0.8.2-spark3.2-s_2.12/graphframes-0.8.2-spark3.2-s_2.12.jar
 ```
 
-### 2. Install SonarDBSCAN
-From the root of this project directory, create a virtual environment and install the library using `uv`:
+### 2. Package Installation
+Instantiate a virtual environment and install the package from the source directory:
 
 ```bash
 uv venv
@@ -61,96 +71,72 @@ source .venv/bin/activate
 uv pip install .
 ```
 
----
+## Usage Integration
 
-## 🚀 Usage Guide
+The library interfaces directly with PySpark DataFrames. The input DataFrame strictly requires an integer identifier column and a features array column of double-precision floats.
 
-SonarDBSCAN is designed to be plug-and-play for PySpark DataFrames. 
-
-### Step 1: Initialize the Spark Session
-Because GraphFrames relies on connected components (which recursively generate long RDD lineages), it **requires** a Spark Checkpoint directory to truncate the lineage and prevent StackOverflow errors. 
-
-You must attach the JAR and set the checkpoint directory when starting your session:
+### Session Initialization
+GraphFrames' connected component algorithm builds deep RDD lineages. To prevent memory overflow and `StackOverflowError` exceptions, a Spark Checkpoint directory must be explicitly configured during session initialization.
 
 ```python
 from pyspark.sql import SparkSession
 
-# Path to the JAR you downloaded via curl
 GRAPH_FRAMES_JAR_PATH = "graphframes-0.8.2-spark3.2-s_2.12.jar"
 
 spark = SparkSession.builder \
     .master("local[*]") \
-    .appName("SonarDBSCAN_Clustering") \
-    .config('spark.jars', GRAPH_FRAMES_JAR_PATH) \
+    .appName("SonarDBSCAN_Execution") \
+    .config("spark.jars", GRAPH_FRAMES_JAR_PATH) \
     .getOrCreate()
 
-# REQUIRED: Set a checkpoint directory for GraphFrames
-spark.sparkContext.setCheckpointDir('/tmp/spark-checkpoints')
+spark.sparkContext.setCheckpointDir("/tmp/spark-checkpoints")
 ```
 
-### Step 2: Prepare Your Data
-Your DataFrame must have two specific columns:
-1. An **identifier** column (`IntegerType`)
-2. A **features** column (`ArrayType(DoubleType)`)
+### Execution Example
 
 ```python
 from pyspark.sql import types as t
+from sonardbscan import SonarDBSCAN
 
 data = [
-    (1, [0.0, 0.0]), (2, [0.0, 0.1]), (3, [0.0, 0.2]), # Will form Cluster 1
-    (4, [10.0, 10.0]), (5, [10.1, 10.1]),              # Will form Cluster 2
-    (7, [5.0, 5.0]), (8, [5.1, 4.9])                   # Isolated points (Noise)
+    (1, [0.0, 0.0]), (2, [0.0, 0.1]), (3, [0.0, 0.2]),
+    (4, [10.0, 10.0]), (5, [10.1, 10.1]),
+    (7, [5.0, 5.0]), (8, [5.1, 4.9])
 ]
 
 schema = t.StructType([
-    t.StructField('identifier', t.IntegerType(), nullable=False),
-    t.StructField('features', t.ArrayType(t.DoubleType()), nullable=False)
+    t.StructField("identifier", t.IntegerType(), nullable=False),
+    t.StructField("features", t.ArrayType(t.DoubleType()), nullable=False)
 ])
 
 df = spark.createDataFrame(data, schema)
-```
 
-### Step 3: Run the Clustering
-Instantiate the `SonarDBSCAN` class and call the `.fit()` method. 
-
-```python
-from sonardbscan import SonarDBSCAN
-
-# Initialize the model
+# Initialize the clustering model
 scanner = SonarDBSCAN(
     epsilon=0.3, 
     min_pts=2, 
-    features_col='features', 
-    identifier_col='identifier'
+    features_col="features", 
+    identifier_col="identifier"
 )
 
-# Fit the model and generate clusters
+# Execute clustering
 clustered_df = scanner.fit(df)
-
-# View the results
-clustered_df.select('identifier', 'features', 'clusterId').show()
+clustered_df.select("identifier", "features", "clusterId").show()
 ```
 
-*Note: The output DataFrame includes a new `clusterId` column. Any point classified as Noise is assigned a `clusterId` of `-1`.*
+*Implementation Note: Observations categorized as Noise by the DBSCAN definition are deterministically assigned a `clusterId` of `-1`.*
 
----
+## Testing Framework
 
-## 🧪 Running Tests
-
-SonarDBSCAN includes a comprehensive Pytest suite. The test configuration automatically downloads the GraphFrames dependency dynamically, so you don't need to manually link the JAR for testing.
-
-To run the tests with `uv`:
+The repository is equipped with a comprehensive Pytest suite covering distance metrics, triangle inequality boundaries, and complete graph resolution. The test configuration automatically dynamically resolves the GraphFrames dependencies.
 
 ```bash
-# Install the testing dependencies
 uv pip install -e .[dev]
-
-# Run the test suite
 pytest tests/
 ```
 
----
+## Performance Considerations and Limitations
 
-## 🗺️ Roadmap & Known Limitations
-* **Non-Sequential Cluster IDs:** Because cluster IDs are generated via GraphFrames' connected components (using the lowest vertex ID in the component), the output `clusterId` integers may skip numbers (e.g., clusters 1, 4, 7). This does not affect mathematical correctness but is purely aesthetic.
-* **Algorithm Extensibility:** Future versions plan to support configurable distance metrics (e.g., Manhattan, Cosine) provided they satisfy the metric space rules necessary for the triangle inequality optimization.
+* **Discontinuous Cluster Identifiers:** Because cluster indices are derived directly from the lowest vertex identifier within a GraphFrames connected component, the resulting `clusterId` values are not guaranteed to be strictly sequential (e.g., outputs may yield indices 1, 4, and 7 without intermediate values).
+* **Metric Space Constraint:** The internal optimization is fundamentally reliant on the triangle inequality. Custom distance functions injected into the architecture must mathematically satisfy metric space axioms; otherwise, the spatial pruning will yield false negatives during neighbor detection.
+
